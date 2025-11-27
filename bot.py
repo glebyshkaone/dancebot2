@@ -4,6 +4,7 @@ from typing import Any
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # -------------------- БОТ И ДИСПЕТЧЕР --------------------
 
-bot = Bot(BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
 
 # -------------------- БАЗА ДАННЫХ --------------------
