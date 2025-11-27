@@ -1,11 +1,13 @@
 import asyncio
 import logging
+from typing import Any
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.filters import Command, CommandStart
+from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import BOT_TOKEN, DATABASE_URL
@@ -17,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # -------------------- БОТ И ДИСПЕТЧЕР --------------------
 
-bot = Bot(BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
 
 # -------------------- БАЗА ДАННЫХ --------------------
@@ -59,6 +61,17 @@ async def get_or_create_user(tg_user) -> asyncpg.Record:
         return row
 
 
+def _get_row_value(row: asyncpg.Record | None, *keys: str, default: str = "") -> str:
+    """Безопасно достаём значение из asyncpg.Record."""
+    if row is None:
+        return default
+    data: dict[str, Any] = dict(row)
+    for key in keys:
+        if key in data and data[key] is not None:
+            return str(data[key])
+    return default
+
+
 # -------------------- ХЕНДЛЕРЫ СООБЩЕНИЙ --------------------
 
 
@@ -73,14 +86,14 @@ async def cmd_start(message: Message):
     async with pool.acquire() as conn:
         # Таблица programs: id, name
         programs = await conn.fetch(
-            "SELECT id, name FROM programs ORDER BY name"
+            "SELECT * FROM programs ORDER BY name"
         )
 
     if not programs:
         await message.answer(
             "Привет! 👋\n\n"
             "Пока в базе нет ни одной программы.\n"
-            "Добавь их через админку Supabase в таблицу *programs*."
+            "Добавь их через админку Supabase в таблицу *programs*.",
         )
         return
 
@@ -94,7 +107,7 @@ async def cmd_start(message: Message):
     kb = InlineKeyboardBuilder()
     for row in programs:
         kb.button(
-            text=row["name"],
+            text=_get_row_value(row, "name", "title", default="Без названия"),
             callback_data=f"program:{row['id']}",
         )
     kb.adjust(1)
@@ -130,4 +143,153 @@ async def on_program(callback: CallbackQuery):
 
     pool = await get_db()
     async with pool.acquire() as conn:
-        program = aw
+        program = await conn.fetchrow("SELECT * FROM programs WHERE id = $1", program_id)
+        dances = await conn.fetch(
+            "SELECT * FROM dances WHERE program_id = $1 ORDER BY name",
+            program_id,
+        )
+
+    if program is None:
+        await callback.answer("Программа не найдена", show_alert=True)
+        return
+
+    if not dances:
+        await callback.message.edit_text(
+            f"Программа *{_get_row_value(program, 'name', 'title', default='без названия')}* пока пустая."
+            "\nДобавьте танцы в таблицу *dances*.",
+        )
+        await callback.answer()
+        return
+
+    kb = InlineKeyboardBuilder()
+    for row in dances:
+        kb.button(
+            text=_get_row_value(row, "name", "title", default="Без названия"),
+            callback_data=f"dance:{row['id']}:{program_id}",
+        )
+    kb.adjust(1)
+
+    await callback.message.edit_text(
+        f"Танцы в программе *{_get_row_value(program, 'name', 'title', default='без названия')}*:",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("dance:"))
+async def on_dance(callback: CallbackQuery):
+    """Выбор танца → показываем фигуры."""
+    _, dance_id_str, program_id_str = callback.data.split(":")
+    dance_id = int(dance_id_str)
+    program_id = int(program_id_str)
+
+    pool = await get_db()
+    async with pool.acquire() as conn:
+        dance = await conn.fetchrow("SELECT * FROM dances WHERE id = $1", dance_id)
+        figures = await conn.fetch(
+            "SELECT * FROM figures WHERE dance_id = $1 ORDER BY id",
+            dance_id,
+        )
+        program = await conn.fetchrow("SELECT * FROM programs WHERE id = $1", program_id)
+
+    if dance is None:
+        await callback.answer("Танец не найден", show_alert=True)
+        return
+
+    if not figures:
+        await callback.message.edit_text(
+            f"В танце *{_get_row_value(dance, 'name', 'title', default='без названия')}* нет фигур."
+            "\nДобавьте их в таблицу *figures*.",
+        )
+        await callback.answer()
+        return
+
+    kb = InlineKeyboardBuilder()
+    for row in figures:
+        kb.button(
+            text=_get_row_value(row, "name", "title", default="Без названия"),
+            callback_data=f"figure:{row['id']}:{dance_id}:{program_id}",
+        )
+    kb.button(
+        text="← Назад к программам",
+        callback_data=f"program:{program_id}",
+    )
+    kb.adjust(1)
+
+    await callback.message.edit_text(
+        f"Фигуры в танце *{_get_row_value(dance, 'name', 'title', default='без названия')}*\n"
+        f"Программа: {_get_row_value(program, 'name', 'title', default='неизвестно')}",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("figure:"))
+async def on_figure(callback: CallbackQuery):
+    """Показываем описание фигуры."""
+    _, figure_id_str, dance_id_str, program_id_str = callback.data.split(":")
+    figure_id = int(figure_id_str)
+    dance_id = int(dance_id_str)
+    program_id = int(program_id_str)
+
+    pool = await get_db()
+    async with pool.acquire() as conn:
+        figure = await conn.fetchrow("SELECT * FROM figures WHERE id = $1", figure_id)
+        dance = await conn.fetchrow("SELECT * FROM dances WHERE id = $1", dance_id)
+        program = await conn.fetchrow("SELECT * FROM programs WHERE id = $1", program_id)
+
+    if figure is None:
+        await callback.answer("Фигура не найдена", show_alert=True)
+        return
+
+    title = _get_row_value(figure, "name", "title", default="Фигура")
+    description = _get_row_value(
+        figure,
+        "description",
+        "text",
+        "content",
+        default="Описание пока не заполнено.",
+    )
+    level = _get_row_value(figure, "level", "difficulty", default="")
+    video = _get_row_value(figure, "video_url", "video", "link", default="")
+
+    parts = [f"*{title}*"]
+    if level:
+        parts.append(f"Уровень: {level}")
+    if description:
+        parts.append(description)
+    if video:
+        if video.startswith("http"):
+            parts.append(f"[Видео]({video})")
+        else:
+            parts.append(f"Видео: {video}")
+
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="← Назад к фигурам",
+        callback_data=f"dance:{dance_id}:{program_id}",
+    )
+    kb.button(
+        text="← В программы",
+        callback_data=f"program:{program_id}",
+    )
+    kb.adjust(1)
+
+    await callback.message.edit_text("\n\n".join(parts), reply_markup=kb.as_markup())
+    await callback.answer()
+
+
+# -------------------- ЗАПУСК --------------------
+
+
+async def main():
+    try:
+        await dp.start_polling(bot)
+    finally:
+        if _db_pool is not None:
+            await _db_pool.close()
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
